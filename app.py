@@ -1,20 +1,20 @@
 import streamlit as st
 import docx
 import pandas as pd
-import openpyxl
+from fpdf import FPDF
 import re
 import io
 import zipfile
 
 # ==============================================================================
-# 1. CONFIGURAÇÃO DA PÁGINA STREAMLIT
+# 1. CONFIGURAÇÃO DA PÁGINA
 # ==============================================================================
-st.set_page_config(page_title="Gerador Automático de FCDA", layout="wide")
-st.title("🚁 Gerador de FCDA - Automação de Diretrizes")
-st.markdown("Faça o upload da FADT (Word) e do Template FCDA (Excel) para gerar os documentos preenchidos.")
+st.set_page_config(page_title="Gerador de FCDA em PDF", layout="centered")
+st.title("🚁 Gerador de FCDA (Exportação em PDF)")
+st.markdown("Faça o upload da FADT (Word) para extrair os dados e gerar os formulários FCDA em PDF.")
 
 # ==============================================================================
-# 2. BANCO DE DADOS E FUNÇÕES
+# 2. BANCO DE DADOS E FUNÇÕES DE LIMPEZA
 # ==============================================================================
 bd_aeronaves = {
     "PRHTV": {"Modelo": "AS 350 B2", "Fabricante": "AIRBUS HELICOPTERS"},
@@ -133,17 +133,11 @@ def obter_texto_com_checkbox(cell):
         elif tag == 'tab':
             text_parts.append('\t')
         elif tag == 'sym':
-            char_val = None
-            for k in element.keys():
-                if k.endswith('char'):
-                    char_val = element.get(k)
-                    break
+            char_val = next((element.get(k) for k in element.keys() if k.endswith('char')), None)
             if char_val:
                 char_val = char_val.upper()
-                if char_val in ['F0FE', 'F0FD', 'F058', '00FE', '00FD', '0058', '2611']:
-                    text_parts.append('[X] ')
-                elif char_val in ['F0A8', 'F0A1', '00A8', '00A1', '2610']:
-                    text_parts.append('[ ] ')
+                if char_val in ['F0FE', 'F0FD', 'F058', '00FE', '00FD', '0058', '2611']: text_parts.append('[X] ')
+                elif char_val in ['F0A8', 'F0A1', '00A8', '00A1', '2610']: text_parts.append('[ ] ')
         elif tag == 'checkbox':
             checked = False
             for child in element.iter():
@@ -159,19 +153,61 @@ def obter_texto_com_checkbox(cell):
     return re.sub(r' +', ' ', full_text).strip()
 
 # ==============================================================================
-# 3. INTERFACE E LÓGICA DE PROCESSAMENTO
+# 3. FUNÇÃO QUE DESENHA O PDF
 # ==============================================================================
-col1, col2 = st.columns(2)
+def criar_pdf_fcda(dados):
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_auto_page_break(auto=True, margin=15)
+    
+    # Resolve caracteres especiais (evita erro no FPDF com acentos)
+    def clean_text(text):
+        return str(text).encode('latin-1', 'replace').decode('latin-1')
 
-with col1:
-    fadt_file = st.file_uploader("📄 1. Anexar FADT Analisada (.docx)", type=["docx"])
+    # Título do Documento
+    pdf.set_font("Helvetica", 'B', 16)
+    pdf.cell(0, 10, clean_text(f"FCDA - MATRÍCULA: {dados['matricula']}"), ln=True, align='C')
+    pdf.ln(5)
 
-with col2:
-    template_file = st.file_uploader("📊 2. Anexar FCDA Modelo (.xlsx)", type=["xlsx"])
+    # Função auxiliar para criar as "linhas" do formulário
+    def adicionar_campo(titulo, valor):
+        pdf.set_font("Helvetica", 'B', 11)
+        pdf.cell(0, 6, clean_text(titulo), ln=True)
+        pdf.set_font("Helvetica", '', 11)
+        pdf.multi_cell(0, 6, clean_text(valor))
+        pdf.ln(3)
 
-if fadt_file and template_file:
-    if st.button("🚀 Gerar Documentos (ZIP)", use_container_width=True):
-        with st.spinner('Lendo Word e Extraindo Matrículas...'):
+    adicionar_campo("1 - Aeronave/Modelo:", dados['matricula'])
+    adicionar_campo("2 - Diretriz:", dados['diretriz'])
+    adicionar_campo("3 - Efetividade:", dados['data_efetiva'])
+    adicionar_campo("4 - Vencimento(s):", dados['vencimento'])
+    adicionar_campo("5 - Aplicável:", dados['aplicavel_tipo'])
+    adicionar_campo("6 - Tipo de ação:", dados['tipo_acao'])
+    adicionar_campo("7 - Análise:", dados['analise'])
+    adicionar_campo("8 - Justificativa:", dados['justificativa'])
+    adicionar_campo("9/10 - Documentos de Referência:", dados['docs_ref'])
+
+    pdf.ln(5)
+    pdf.set_font("Helvetica", 'B', 12)
+    pdf.cell(0, 8, clean_text("11 - Identificação do Produto Aeronáutico"), ln=True, align='C')
+    pdf.line(10, pdf.get_y(), 200, pdf.get_y()) # Linha divisória
+    pdf.ln(2)
+    
+    adicionar_campo("Fabricante:", dados['fabricante'])
+    adicionar_campo("Modelo:", dados['modelo'])
+    adicionar_campo("S/N:", dados['sn'])
+
+    # Retorna o PDF em formato de bytes para salvar no ZIP
+    return pdf.output(dest='S')
+
+# ==============================================================================
+# 4. INTERFACE E EXTRAÇÃO
+# ==============================================================================
+fadt_file = st.file_uploader("📄 Anexar FADT Analisada (.docx)", type=["docx"])
+
+if fadt_file:
+    if st.button("🚀 Gerar FCDAs em PDF (ZIP)", use_container_width=True):
+        with st.spinner('Extraindo dados e desenhando PDFs...'):
             
             # --- LEITURA DO WORD ---
             doc = docx.Document(fadt_file)
@@ -224,48 +260,33 @@ if fadt_file and template_file:
             ext_tipo = "Aeronave" if "[X] Aeronave" in texto_cabecalho else ("Motor" if "[X] Motor" in texto_cabecalho else "Verificar")
             ext_acao = "Terminal" if "[X] Terminal" in texto_cabecalho else ("Repetitiva" if "[X] Repetitiva" in texto_cabecalho else "Verificar")
 
-            # --- GERAÇÃO DOS EXCEIS NA MEMÓRIA E EMPACOTAMENTO ZIP ---
+            # --- GERAÇÃO DOS PDFs E EMPACOTAMENTO ZIP ---
             zip_buffer = io.BytesIO()
             with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
                 
-                def injetar_dados(mat_crua, vencimento, analise, justificativa):
+                def injetar_e_salvar_pdf(mat_crua, vencimento, analise, justificativa):
                     mat_hifen, sn, modelo, fab = interpretar_matricula(mat_crua)
                     
-                    # Retorna o ponteiro do template_file para o começo para o openpyxl poder ler novamente
-                    template_file.seek(0)
-                    wb = openpyxl.load_workbook(template_file)
-                    ws = wb.active
-
-                    ws['A6'] = mat_hifen
-                    ws['F6'] = ext_diretriz
-                    ws['A8'] = ext_data_efetiva
-                    ws['F8'] = vencimento
-                    ws['A10'] = ext_tipo
-                    ws['A12'] = ext_acao
-                    ws['A14'] = analise
-                    ws['A16'] = justificativa
-                    ws['A18'] = ext_docs
-                    ws['A24'] = fab
-                    ws['D24'] = modelo
-                    ws['I24'] = sn
-
-                    excel_buffer = io.BytesIO()
-                    wb.save(excel_buffer)
-                    wb.close()
+                    dados = {
+                        'matricula': mat_hifen, 'diretriz': ext_diretriz, 'data_efetiva': ext_data_efetiva,
+                        'vencimento': vencimento, 'aplicavel_tipo': ext_tipo, 'tipo_acao': ext_acao,
+                        'analise': analise, 'justificativa': justificativa, 'docs_ref': ext_docs,
+                        'fabricante': fab, 'modelo': modelo, 'sn': sn
+                    }
                     
-                    # Salva no Zip dentro de uma pastinha com o nome da matrícula
-                    zip_path = f"{mat_hifen}/FCDA_{mat_hifen}.xlsx"
-                    zip_file.writestr(zip_path, excel_buffer.getvalue())
+                    pdf_bytes = criar_pdf_fcda(dados)
+                    # Salva direto na raiz do ZIP, sem pastas
+                    zip_file.writestr(f"FCDA_{mat_hifen}.pdf", pdf_bytes)
 
-                for a in aplicaveis: injetar_dados(a[0], a[1], 'SIM', a[2])
-                for na in nao_aplicaveis: injetar_dados(na[0], 'N/A', 'NÃO', na[1])
+                for a in aplicaveis: injetar_e_salvar_pdf(a[0], a[1], 'SIM', a[2])
+                for na in nao_aplicaveis: injetar_e_salvar_pdf(na[0], 'N/A', 'NÃO', na[1])
 
             # --- BOTÃO DE DOWNLOAD FINAL ---
-            st.success("✅ Documentos gerados com sucesso!")
+            st.success("✅ Todos os PDFs gerados com sucesso!")
             st.download_button(
-                label="📥 Baixar FCDAs (ZIP)",
+                label="📥 Baixar todos os FCDAs (Formato PDF)",
                 data=zip_buffer.getvalue(),
-                file_name="Lote_FCDAs.zip",
+                file_name="Lote_FCDAs_PDF.zip",
                 mime="application/zip",
                 use_container_width=True
             )
